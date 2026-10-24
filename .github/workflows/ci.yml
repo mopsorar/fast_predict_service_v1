@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.8"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Run tests
+        run: uv run --locked python -m pytest -q
+
+      - name: Ruff lint
+        run: uv run --locked ruff check .
+
+      - name: Ruff format check
+        run: uv run --locked ruff format --check .
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build Docker image
+        run: docker build --tag fastpredict:ci .
+
+      - name: Smoke-test threadpool and blocking
+        shell: bash
+        run: |
+          set -euo pipefail
+          for mode in threadpool blocking; do
+            echo "Testing execution mode: $mode"
+            docker run --detach --name fastpredict-smoke \
+              --publish 127.0.0.1:8000:8000 \
+              --env FASTPREDICT_EXECUTION_MODE="$mode" \
+              --env WEB_CONCURRENCY=1 fastpredict:ci
+
+            ready=false
+            for attempt in {1..30}; do
+              if status="$(curl --silent --show-error --connect-timeout 1 --max-time 2 \
+                --output health.json --write-out '%{http_code}' \
+                http://127.0.0.1:8000/health)" && [ "$status" = 200 ] && \
+                python3 -c 'import json; data = json.load(open("health.json")); assert data == {"status": "ok", "model_loaded": True}, data'; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            if [ "$ready" != true ]; then
+              echo "Application did not become ready in mode $mode" >&2
+              exit 1
+            fi
+
+            status="$(curl --silent --show-error --connect-timeout 2 --max-time 10 \
+              --output prediction.json --write-out '%{http_code}' \
+              --header 'Content-Type: application/json' \
+              --data '{"sepal_length":5.1,"sepal_width":3.5,"petal_length":1.4,"petal_width":0.2}' \
+              http://127.0.0.1:8000/predict)"
+            test "$status" = 200
+            python3 - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          data = json.loads(Path("prediction.json").read_text())
+          assert isinstance(data, dict), data
+          assert set(data) == {"prediction", "confidence"}, data
+          assert data["prediction"] == "setosa", data
+          confidence = data["confidence"]
+          assert type(confidence) in (int, float), data
+          assert math.isfinite(confidence) and 0.0 <= confidence <= 1.0, data
+          PY
+
+            status="$(curl --silent --show-error --connect-timeout 2 --max-time 10 \
+              --output invalid.json --write-out '%{http_code}' \
+              --header 'Content-Type: application/json' \
+              --data '{"sepal_length":-5.1,"sepal_width":3.5,"petal_length":1.4,"petal_width":0.2}' \
+              http://127.0.0.1:8000/predict)"
+            test "$status" = 422
+
+            docker stop fastpredict-smoke
+            docker rm fastpredict-smoke
+          done
+
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs fastpredict-smoke || true
+
+      - name: Clean up container
+        if: always()
+        shell: bash
+        run: |
+          if docker container inspect fastpredict-smoke >/dev/null 2>&1; then
+            docker rm --force fastpredict-smoke
+          fi
