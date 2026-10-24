@@ -1,0 +1,22 @@
+[project]
+name = "fastpredict"
+version = "0.1.0"
+description = "High-Performance Inference Service"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastapi==0.115.12",
+    "uvicorn==0.34.2",
+    "scikit-learn==1.6.1",
+    "joblib==1.4.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "httpx==0.28.1",
+    "locust==2.47.0",
+    "ruff==0.11.8",
+]
+
+[tool.uv]
+package = false

@@ -1,0 +1,10 @@
+# Only installation inputs and application source belong in the build context.
+**
+!Dockerfile
+!.dockerignore
+!pyproject.toml
+!uv.lock
+!train_model.py
+!app/
+app/**
+!app/*.py
